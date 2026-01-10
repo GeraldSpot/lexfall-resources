@@ -17,6 +17,83 @@ local function clearBlips()
   end
 end
 
+local function buildBlip(call)
+  local coords = safeGround(call.coords)
+
+  activeBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
+  SetBlipSprite(activeBlip, 153)
+  SetBlipColour(activeBlip, call.severity == 'critical' and 1 or 5)
+  SetBlipScale(activeBlip, 0.9)
+  SetBlipAsShortRange(activeBlip, false)
+  BeginTextCommandSetBlipName('STRING')
+  AddTextComponentString('EMS Call')
+  EndTextCommandSetBlipName(activeBlip)
+end
+
+local function getLocalServerId()
+  return GetPlayerServerId(PlayerId())
+end
+
+local function cleanupCall(callId)
+  local st = spawnedPatients[callId]
+  if not st then return end
+
+  if st.ped and DoesEntityExist(st.ped) then
+    DeleteEntity(st.ped)
+  end
+
+  spawnedPatients[callId] = nil
+  clearBlips()
+
+  if activeZone then
+    exports.ox_target:removeZone(activeZone)
+    activeZone = nil
+  end
+end
+
+local function pickHospital()
+  local hospitals = Config.Hospitals or {}
+  if #hospitals == 0 then return nil end
+
+  local ped = PlayerPedId()
+  local pcoords = GetEntityCoords(ped)
+  local closest = hospitals[1]
+  local bestDist = #(pcoords - closest.coords)
+
+  for i = 2, #hospitals do
+    local h = hospitals[i]
+    local dist = #(pcoords - h.coords)
+    if dist < bestDist then
+      bestDist = dist
+      closest = h
+    end
+  end
+
+  return closest
+end
+
+local function playTreatAnim()
+  if Config.Anim and Config.Anim.enabled then
+    RequestAnimDict(Config.Anim.dict)
+    while not HasAnimDictLoaded(Config.Anim.dict) do Wait(0) end
+    TaskPlayAnim(
+      PlayerPedId(),
+      Config.Anim.dict,
+      Config.Anim.name,
+      8.0,
+      -8.0,
+      Config.TreatDurationMs or 7000,
+      Config.Anim.flag or 49,
+      0.0,
+      false,
+      false,
+      false
+    )
+  else
+    TaskStartScenarioInPlace(PlayerPedId(), 'CODE_HUMAN_MEDIC_TEND_TO_DEAD', 0, true)
+  end
+end
+
 local function safeGround(coords)
   local found, z = GetGroundZFor_3dCoord(coords.x, coords.y, coords.z + 50.0, false)
   if found then
@@ -33,24 +110,19 @@ RegisterNetEvent('lf_ems:client_newCall', function(call)
 
   notify('Lexfall EMS+', call.complaint or 'Medical emergency reported', 'info')
 
-  local coords = safeGround(call.coords)
-
-  activeBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
-  SetBlipSprite(activeBlip, 153)
-  SetBlipColour(activeBlip, call.severity == 'critical' and 1 or 5)
-  SetBlipScale(activeBlip, 0.9)
-  SetBlipAsShortRange(activeBlip, false)
-  BeginTextCommandSetBlipName('STRING')
-  AddTextComponentString('EMS Call')
-  EndTextCommandSetBlipName(activeBlip)
-
-  SetNewWaypoint(coords.x, coords.y)
-
   spawnedPatients[call.callId] = {
     call = call,
     stage = 'enroute',
     ped = nil
   }
+
+  if not Config.BlipOnAccept then
+    buildBlip(call)
+  end
+
+  if not Config.WaypointOnAccept then
+    SetNewWaypoint(call.coords.x, call.coords.y)
+  end
 end)
 
 -- ============================================================
@@ -58,7 +130,15 @@ end)
 -- ============================================================
 RegisterNetEvent('lf_ems:client_beginRoute', function(call)
   if not spawnedPatients[call.callId] then return end
-  SetNewWaypoint(call.coords.x, call.coords.y)
+
+  if Config.BlipOnAccept then
+    clearBlips()
+    buildBlip(call)
+  end
+
+  if Config.WaypointOnAccept then
+    SetNewWaypoint(call.coords.x, call.coords.y)
+  end
 end)
 
 -- ============================================================
@@ -124,10 +204,10 @@ RegisterNetEvent('lf_ems:client_treat', function(callId)
   st.stage = 'treating'
 
   ClearPedTasksImmediately(PlayerPedId())
-  TaskStartScenarioInPlace(PlayerPedId(), 'CODE_HUMAN_MEDIC_TEND_TO_DEAD', 0, true)
+  playTreatAnim()
 
   local ok = exports.ox_lib:progressCircle({
-    duration = 6000,
+    duration = Config.TreatDurationMs or 7000,
     label = 'Treating patient...',
     position = 'bottom',
     canCancel = false,
@@ -142,6 +222,14 @@ RegisterNetEvent('lf_ems:client_treat', function(callId)
   end
 
   st.stage = 'stabilized'
+  if not Config.TransportEnabled then
+    local outcome = st.call.severity == 'critical' and 'saved_critical' or 'saved_serious'
+    notify('Lexfall EMS+', 'Patient stabilized on scene.', 'success')
+    TriggerServerEvent('lf_ems:resolved', callId, outcome)
+    cleanupCall(callId)
+    return
+  end
+
   notify('Lexfall EMS+', 'Patient stabilized. Transport to hospital.', 'success')
 
   exports.ox_target:addLocalEntity(st.ped, {
@@ -169,14 +257,20 @@ RegisterNetEvent('lf_ems:client_loaded', function(callId)
 
   clearBlips()
 
-  local hospital = vec3(311.2, -592.7, 43.3) -- Pillbox
-  SetNewWaypoint(hospital.x, hospital.y)
+  local hospital = pickHospital()
+  if not hospital then
+    notify('Lexfall EMS+', 'No hospital configured for dropoff.', 'error')
+    return
+  end
 
-  notify('Lexfall EMS+', 'Transport patient to Pillbox.', 'info')
+  st.hospital = hospital
+  SetNewWaypoint(hospital.coords.x, hospital.coords.y)
+
+  notify('Lexfall EMS+', ('Transport patient to %s.'):format(hospital.name or 'hospital'), 'info')
 
   activeZone = exports.ox_target:addSphereZone({
-    coords = hospital,
-    radius = 5.0,
+    coords = hospital.coords,
+    radius = hospital.radius or 5.0,
     debug = false,
     options = {
       {
@@ -198,20 +292,45 @@ RegisterNetEvent('lf_ems:client_dropoff', function(callId)
   if not st or st.stage ~= 'loaded' then return end
 
   exports.ox_lib:progressCircle({
-    duration = 4000,
+    duration = Config.DropoffDurationMs or 4200,
     label = 'Handing off to hospital staff...',
     position = 'bottom',
     disable = { move=true, car=true, combat=true }
   })
 
-  TriggerServerEvent('lf_ems:resolved', callId, 'saved_serious')
+  local outcome = st.call.severity == 'critical' and 'saved_critical' or 'saved_serious'
+  TriggerServerEvent('lf_ems:resolved', callId, outcome)
 
   notify('Lexfall EMS+', 'Patient delivered successfully.', 'success')
+  cleanupCall(callId)
+end)
 
-  if activeZone then
-    exports.ox_target:removeZone(activeZone)
-    activeZone = nil
+-- ============================================================
+-- CALL STATUS UPDATES
+-- ============================================================
+RegisterNetEvent('lf_ems:client_callAccepted', function(data)
+  if not data or not data.call then return end
+  local callId = data.call.callId
+  if not callId or not spawnedPatients[callId] then return end
+
+  if data.by and data.by ~= getLocalServerId() then
+    notify('Lexfall EMS+', 'Call accepted by another unit.', 'info')
+    cleanupCall(callId)
   end
+end)
 
-  spawnedPatients[callId] = nil
+RegisterNetEvent('lf_ems:client_callDeniedAck', function()
+  notify('Lexfall EMS+', 'Call denied.', 'info')
+end)
+
+RegisterNetEvent('lf_ems:client_callExpired', function(data)
+  if not data or not data.callId then return end
+  notify('Lexfall EMS+', 'Call expired.', 'info')
+  cleanupCall(data.callId)
+end)
+
+RegisterNetEvent('lf_ems:client_callResolved', function(data)
+  if not data or not data.callId then return end
+  notify('Lexfall EMS+', 'Call resolved.', 'info')
+  cleanupCall(data.callId)
 end)
