@@ -17,19 +17,6 @@ local function clearBlips()
   end
 end
 
-local function buildBlip(call)
-  local coords = safeGround(call.coords)
-
-  activeBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
-  SetBlipSprite(activeBlip, 153)
-  SetBlipColour(activeBlip, call.severity == 'critical' and 1 or 5)
-  SetBlipScale(activeBlip, 0.9)
-  SetBlipAsShortRange(activeBlip, false)
-  BeginTextCommandSetBlipName('STRING')
-  AddTextComponentString('EMS Call')
-  EndTextCommandSetBlipName(activeBlip)
-end
-
 local function getLocalServerId()
   return GetPlayerServerId(PlayerId())
 end
@@ -100,6 +87,19 @@ local function safeGround(coords)
     return vec3(coords.x, coords.y, z)
   end
   return coords
+end
+
+local function buildBlip(call)
+  local coords = safeGround(call.coords)
+
+  activeBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
+  SetBlipSprite(activeBlip, 153)
+  SetBlipColour(activeBlip, call.severity == 'critical' and 1 or 5)
+  SetBlipScale(activeBlip, 0.9)
+  SetBlipAsShortRange(activeBlip, false)
+  BeginTextCommandSetBlipName('STRING')
+  AddTextComponentString('EMS Call')
+  EndTextCommandSetBlipName(activeBlip)
 end
 
 -- ============================================================
